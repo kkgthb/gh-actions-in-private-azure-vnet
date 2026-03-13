@@ -73,6 +73,7 @@ data "external" "gh_network_config_id" {
   ]
 }
 
+# Create a runner group
 resource "github_actions_runner_group" "my_gh_runner_group" {
   depends_on                 = [null_resource.my_gh_network_config]
   name                       = local.my_gh_runner_group_name
@@ -101,6 +102,7 @@ resource "null_resource" "my_gh_runner_group_network_config" {
   }
 }
 
+# Create a runner
 resource "github_actions_hosted_runner" "my_gh_runner" {
   depends_on      = [null_resource.my_gh_network_config, null_resource.my_gh_runner_group_network_config]
   name            = local.my_gh_runner_name
@@ -110,4 +112,33 @@ resource "github_actions_hosted_runner" "my_gh_runner" {
     source = "github"
     id     = "2306" # 2306 is ubuntu_latest as of 2026-03-13
   }
+}
+
+# A quick check to witness the runner hopefully
+resource "github_repository" "my_gh_repo" {
+  depends_on = [github_actions_hosted_runner.my_gh_runner]
+  name       = local.my_gh_repo_name
+  visibility = "internal"
+  auto_init  = true
+}
+resource "github_repository_file" "my_gha_yaml" {
+  depends_on = [github_actions_hosted_runner.my_gh_runner, github_repository.my_gh_repo]
+  repository = github_repository.my_gh_repo.id
+  file       = ".github/workflows/demo_workflow.yml"
+  content    = <<EOF
+name: "Demo GitHub Actions Workflow"
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - '**'
+jobs:
+  job_1:
+    runs-on: ['${local.my_gh_runner_name}']
+    name: 'First job.  Note it can run in parallel to other jobs'
+    steps:
+      - id: 'step_a_within_job_1'
+        name: 'Write "Hello, World"'
+        run: 'echo "Hello, World.  We are starting our first job"'
+EOF
 }
