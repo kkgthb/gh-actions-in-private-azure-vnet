@@ -5,7 +5,7 @@ data "github_organization" "my_gh_org" {
 
 # Make sure my network config exists
 resource "null_resource" "my_gh_network_config" {
-  depends_on = [ var.az_ghns_ghid ]
+  depends_on = [var.az_ghns_ghid]
   # Fire off this resource block if anything about any of these details changes
   triggers = {
     gh_org_name            = var.gh_org_name
@@ -62,3 +62,52 @@ data "external" "gh_network_config_count" {
   ]
 }
 
+# Look up the ID of the network config we just created so we can assign it to the runner group
+data "external" "gh_network_config_id" {
+  depends_on = [null_resource.my_gh_network_config]
+  program = [
+    "pwsh",
+    "${path.module}/get_network_config_id.ps1",
+    "-theorg", var.gh_org_name,
+    "-thename", local.my_gh_network_config_name
+  ]
+}
+
+resource "github_actions_runner_group" "my_gh_runner_group" {
+  depends_on                 = [null_resource.my_gh_network_config]
+  name                       = local.my_gh_runner_group_name
+  allows_public_repositories = false
+  visibility                 = "all" # TODO:  tighten up this security authZ grant to selected repos once I actually have any
+}
+
+# Assign the network configuration to the runner group
+# (github_actions_runner_group has no network_configuration_id argument in the Terraform provider)
+resource "null_resource" "my_gh_runner_group_network_config" {
+  depends_on = [github_actions_runner_group.my_gh_runner_group, data.external.gh_network_config_id]
+  triggers = {
+    runner_group_id = github_actions_runner_group.my_gh_runner_group.id
+    nc_id           = data.external.gh_network_config_id.result["nc_id"]
+    gh_org_name     = var.gh_org_name
+  }
+  provisioner "local-exec" {
+    when        = create
+    interpreter = ["PowerShell", "-Command"]
+    command     = <<-EOT
+    gh api --method PATCH /orgs/${self.triggers.gh_org_name}/actions/runner-groups/${self.triggers.runner_group_id} `
+      -f network_configuration_id="${self.triggers.nc_id}"
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    Write-Output "Assigned network configuration '${self.triggers.nc_id}' to runner group '${self.triggers.runner_group_id}'."
+    EOT
+  }
+}
+
+resource "github_actions_hosted_runner" "my_gh_runner" {
+  depends_on      = [null_resource.my_gh_network_config, null_resource.my_gh_runner_group_network_config]
+  name            = local.my_gh_runner_name
+  runner_group_id = github_actions_runner_group.my_gh_runner_group.id
+  size            = "2-core"
+  image {
+    source = "github"
+    id     = "2306" # 2306 is ubuntu_latest as of 2026-03-13
+  }
+}
