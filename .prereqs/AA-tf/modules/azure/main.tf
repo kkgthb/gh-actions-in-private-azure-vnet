@@ -7,101 +7,182 @@ resource "azurerm_resource_group" "my_resource_group" {
   location = "centralus"
 }
 
-# TODO:  an Azure network security group.
-# Purpose:  to control inbound/outbound traffic to/from any subnets referencing this NSG.
-# I want to override several of Microsoft's built-in 
-# (https://learn.microsoft.com/en-us/azure/virtual-network/network-security-groups-overview#default-security-rules)
-# default security rules, in this case.
-# I want each subnet to have no inbound access, and only port 443 outbound access.
+# Explicitly register the GitHub.Network resource provider so that the
+# GitHub Network Settings resource below can be provisioned even when
+# resource_provider_registrations = "none" is set on the azurerm provider.
+resource "azurerm_resource_provider_registration" "github_network" {
+  name = "GitHub.Network"
+}
 
-# TODO:  an Azure network security group security rule 
-# (waiddaminute, is this redundant to below?)
-# Name:  (LLM can choose)
-# Access:  Deny
-# Protocol:  * (any)
-# Source:  VirtualNetwork (all ports, 0-65535)
-# Destination:  VirtualNetwork (all ports, 0-65535)
-# Priority:  A much smaller integer (higher priority) than 65000, which is the number at which Microsoft's default security rules in need of override seem to start.
+# ---------------------------------------------------------------------------
+# Network Security Group
+# Purpose:  override Microsoft's built-in default security rules so that
+#   runner subnets have NO inbound access and only port-443 outbound access.
+# ---------------------------------------------------------------------------
+resource "azurerm_network_security_group" "my_nsg" {
+  name                = "${var.workload_nickname}-nsg-demo"
+  location            = azurerm_resource_group.my_resource_group.location
+  resource_group_name = azurerm_resource_group.my_resource_group.name
+}
 
-# TODO:  an Azure network security group security rule
-# Name:  DenyAzureLoadBalancerInBound
-# Access:  Deny
-# Protocol:  * (any)
-# Source:  AzureLoadBalancer (all ports, 0-65535)
-# Destination:  0.0.0.0/0 (all ports, 0-65535)
-# Priority:  A much smaller integer (higher priority) than 65000, which is the number at which Microsoft's default security rules in need of override seem to start.
+# Inbound: deny all traffic sourced from within the virtual network.
+# Overrides Microsoft's default "AllowVnetInBound" rule (priority 65000).
+resource "azurerm_network_security_rule" "deny_vnet_inbound" {
+  name                        = "DenyVnetInBound"
+  priority                    = 4000
+  direction                   = "Inbound"
+  access                      = "Deny"
+  protocol                    = "*"
+  source_port_range           = "*"
+  destination_port_range      = "*"
+  source_address_prefix       = "VirtualNetwork"
+  destination_address_prefix  = "VirtualNetwork"
+  resource_group_name         = azurerm_resource_group.my_resource_group.name
+  network_security_group_name = azurerm_network_security_group.my_nsg.name
+}
 
-# TODO:  an Azure network security group security rule
-# (waiddaminute, is this redundant to above?)
-# Name:  DenyVnetOutBound
-# Access:  Deny
-# Protocol:  * (any)
-# Source:  VirtualNetwork (all ports, 0-65535)
-# Destination:  VirtualNetwork (all ports, 0-65535)
-# Priority:  A much smaller integer (higher priority) than 65000, which is the number at which Microsoft's default security rules in need of override seem to start.
-# Notes:  GitHub Actions runners will each be placed into their own Subnet, 
-#  and they have no business talking to each other, so this helps locks that down even if, for management efficiency, 
-#  they end up placed within the same Azure VNET.  
-#  However, it is unclear if this NSG security rule override will break GitHub Actions runners' ability to reach Azure resources within other VNETs
-#  to which they might be peered.
-#  This resource might need to be destroyed, and notes taken, if it causes such unintended blocks.  But try with it in place, first, and see what happens.
+# Inbound: deny probes from the Azure Load Balancer.
+# Overrides Microsoft's default "AllowAzureLoadBalancerInBound" rule (priority 65001).
+resource "azurerm_network_security_rule" "deny_azure_lb_inbound" {
+  name                        = "DenyAzureLoadBalancerInBound"
+  priority                    = 4001
+  direction                   = "Inbound"
+  access                      = "Deny"
+  protocol                    = "*"
+  source_port_range           = "*"
+  destination_port_range      = "*"
+  source_address_prefix       = "AzureLoadBalancer"
+  destination_address_prefix  = "0.0.0.0/0"
+  resource_group_name         = azurerm_resource_group.my_resource_group.name
+  network_security_group_name = azurerm_network_security_group.my_nsg.name
+}
 
-# TODO:  an Azure network security group security rule
-# Name:  DenyInternetOutbound
-# Access:  Deny
-# Protocol:  * (any)
-# Source:  0.0.0.0/0 (all ports, 0-65535)
-# Destination:  Internet (all ports, 0-65535)
-# Priority:  A smaller integer (higher priority) than that of "DenyInternetOutbound" above.
-#   (waiddaminute, this one is DenyInternetOutbound.  Where did I make a typo in my specs?  Sigh)
+# Outbound: allow HTTPS (443) to the Internet.
+# Must be evaluated BEFORE the two Deny rules below (lower priority number = higher priority).
+# Runners need port 443 to reach GitHub APIs and Azure endpoints.
+resource "azurerm_network_security_rule" "allow_port_443_outbound" {
+  name                        = "AllowPort443InternetOutbound"
+  priority                    = 4000
+  direction                   = "Outbound"
+  access                      = "Allow"
+  protocol                    = "Tcp"
+  source_port_range           = "*"
+  destination_port_range      = "443"
+  source_address_prefix       = "0.0.0.0/0"
+  destination_address_prefix  = "Internet"
+  resource_group_name         = azurerm_resource_group.my_resource_group.name
+  network_security_group_name = azurerm_network_security_group.my_nsg.name
+}
 
-# TODO:  an Azure network security group security rule
-# Name:  AllowPort443InternetOutbound
-# Access:  Allow
-# Protocol:  TCP
-# Port:  443
-# Source:  0.0.0.0/0
-# Destination:  Internet
-# Priority:  A bigger integer (lower priority) than the related NSG security rules below.  A much smaller integer (higher priority) than 65000, 
-#   which is the number at which Microsoft's default security rules in need of override seem to start.
-#   (maybe this is the one that should've said "smaller integer / higher priority" than "DenyInternetOutbound above"??)
-# Notes (no idea if all borked up, too):  See additional NSG security rules below for the ports to reopen.  They will need even smaller integers than this one.
+# Outbound: prevent runners from talking to each other across subnets.
+# Overrides Microsoft's default "AllowVnetOutBound" rule (priority 65000).
+# NOTE:  if VNET peering to other private networks is required, this rule may
+#        need to be removed and those findings documented.
+resource "azurerm_network_security_rule" "deny_vnet_outbound" {
+  name                        = "DenyVnetOutBound"
+  priority                    = 4010
+  direction                   = "Outbound"
+  access                      = "Deny"
+  protocol                    = "*"
+  source_port_range           = "*"
+  destination_port_range      = "*"
+  source_address_prefix       = "VirtualNetwork"
+  destination_address_prefix  = "VirtualNetwork"
+  resource_group_name         = azurerm_resource_group.my_resource_group.name
+  network_security_group_name = azurerm_network_security_group.my_nsg.name
+}
 
-# TODO:  an Azure virtual network (VNET)
-# Notes:  To help network-isolate the "runner" VM.
-#   Of course, in the real world, 
-#   this VNET would need a line of sight into whatever private network it is meant to facilitate continuous deployment into, 
-#   lest the CI/CD job fail at a network level.
-#   But that is beyond the scope of this demo, so don't worry about it for now in this particular tutorial repo.
-# IP count to request from IP address provider (or make up):
-#   an appropriate CIDR block to accommodate expected concurrency from GitHub Actions managed runners associated with the subnets within this VNET.
-#   1 IP per "runner" VM that might concurrently need an IP address from the subnet below.
-#   Times the number of subnets that end up in this VNET, if it expands to include more than one subnet.
-#   See notes below under subnet -- to start, a relatively small space like a /25-/28 should be plenty.
-#   "To determine the appropriate subnet IP address range, we recommend adding a 30% buffer to the maximum job concurrency you anticipate. 
-#    For instance, if your network configuration's runners are set to a maximum job concurrency of 300, 
-#    it's recommended to utilize a subnet IP address range that can accommodate at least 390 runners. 
-#    This buffer helps ensure that your network can handle unexpected increases in VM needs to meet job concurrency without running out of IP addresses."
-#  - https://docs.github.com/en/organizations/managing-organization-settings/configuring-private-networking-for-github-hosted-runners-in-your-organization#configuring-your-azure-resources
+# Outbound: deny all remaining Internet-bound traffic (everything except port 443,
+# which was already allowed above).
+# Overrides Microsoft's default "AllowInternetOutBound" rule (priority 65001).
+resource "azurerm_network_security_rule" "deny_internet_outbound" {
+  name                        = "DenyInternetOutbound"
+  priority                    = 4020
+  direction                   = "Outbound"
+  access                      = "Deny"
+  protocol                    = "*"
+  source_port_range           = "*"
+  destination_port_range      = "*"
+  source_address_prefix       = "0.0.0.0/0"
+  destination_address_prefix  = "Internet"
+  resource_group_name         = azurerm_resource_group.my_resource_group.name
+  network_security_group_name = azurerm_network_security_group.my_nsg.name
+}
 
-# TODO:  An Azure subnet
-# Delegation:  "GitHub.Network/networkSettings"
-# Network Security Group ID:  see network security group above
-# Notes:  Microsoft will use an IP address from within this subnet when provisioning a "runner" VM.
-# IP count to request from IP address provider (or make up):
-#   an appropriate CIDR block to accommodate expected concurrency from GitHub Actions managed runners associated with this subnet.  
-#   1 IP per "runner" VM that might concurrently need an IP address from this subnet, which should have exactly one and only one "GitHub.Network/networkSettings" 
-#   Azure resource within it.  However, any given "GitHub.Network/networkSettings" might offer more than 1 concurrent "runner," 
-#   so more than 1 IP address per subnet might be needed.  
-#   To start, for a proof of concept, a /28 (14 usable IP addresses) per subnet (that is, per "GitHub.Network/networkSettings") should be plenty.
+# ---------------------------------------------------------------------------
+# Virtual Network
+# A /28 gives 16 addresses (14 usable) -- exactly sized for the single /28
+# subnet below, keeping the demo footprint as small as possible.
+# ---------------------------------------------------------------------------
+resource "azurerm_virtual_network" "my_vnet" {
+  name                = "${var.workload_nickname}-vnet-demo"
+  location            = azurerm_resource_group.my_resource_group.location
+  resource_group_name = azurerm_resource_group.my_resource_group.name
+  address_space       = ["10.0.0.0/28"]
+}
 
+# ---------------------------------------------------------------------------
+# Subnet
+# One subnet per GitHub.Network/networkSettings resource.
+# A /28 yields 14 usable IPs -- plenty for a proof-of-concept runner pool.
+# Delegated to GitHub.Network/networkSettings so Azure knows this subnet is
+# reserved for GitHub-hosted runner VMs.
+# ---------------------------------------------------------------------------
+resource "azurerm_subnet" "my_subnet" {
+  name                 = "${var.workload_nickname}-snet-demo"
+  resource_group_name  = azurerm_resource_group.my_resource_group.name
+  virtual_network_name = azurerm_virtual_network.my_vnet.name
+  address_prefixes     = ["10.0.0.0/28"]
+
+  delegation {
+    name = "github-network-settings-delegation"
+    service_delegation {
+      name    = "GitHub.Network/networkSettings"
+      actions = ["Microsoft.Network/virtualNetworks/subnets/join/action"]
+    }
+  }
+}
+
+# Attach the NSG to the subnet.
+resource "azurerm_subnet_network_security_group_association" "my_subnet_nsg_assoc" {
+  subnet_id                 = azurerm_subnet.my_subnet.id
+  network_security_group_id = azurerm_network_security_group.my_nsg.id
+}
+
+# ---------------------------------------------------------------------------
+# GitHub Organization data (used as businessId below)
+# ---------------------------------------------------------------------------
 data "github_organization" "gh_org_details" {
   name = var.gh_org_name
 }
 
-# TODO:  A "GitHub Network Settings" Azure resource.
-# Subnet ID:  (see subnet above)
-# Business ID:  ${data.github_organization.gh_org_details.id}
-# Note:  If no such resource has ever been provisioned before within this Azure subscription, 
-#   an Azure resource provider might need to be registered first, lest provisioning this resource type fail.
-# Note:  Please do not place more than one of these at a time within a given subnet.  Please give each one its own subnet.
+# ---------------------------------------------------------------------------
+# GitHub Network Settings Azure resource  (type: GitHub.Network/networkSettings)
+# This resource registers the subnet with GitHub so that GitHub-hosted runner
+# VMs are provisioned inside the VNET above.
+# One networkSettings resource per subnet -- do not share subnets.
+# Uses the azapi provider because this resource type is not yet surfaced in
+# the azurerm provider.
+# ---------------------------------------------------------------------------
+resource "azapi_resource" "my_ghns" {
+  type      = "GitHub.Network/networkSettings@2024-04-02"
+  name      = "${var.workload_nickname}-ghns-demo"
+  parent_id = azurerm_resource_group.my_resource_group.id
+  location  = azurerm_resource_group.my_resource_group.location
+  body = {
+    properties = {
+      subnetId   = azurerm_subnet.my_subnet.id
+      businessId = data.github_organization.gh_org_details.id
+    }
+  }
+  response_export_values = ["tags.GitHubId"]
+  depends_on = [azurerm_resource_provider_registration.github_network]
+  # GitHub.Network/networkSettings does not return its resource identity in
+  # update (PUT) responses, which causes azapi to error on any in-place change.
+  # Azure also stamps a GitHubId tag on this resource after creation, and the
+  # exported output values are re-computed on every plan -- both of which
+  # trigger spurious updates.  Treat the resource as create/destroy-only.
+  lifecycle {
+    ignore_changes = all
+  }
+}

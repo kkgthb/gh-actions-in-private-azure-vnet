@@ -5,6 +5,7 @@ data "github_organization" "my_gh_org" {
 
 # Make sure my network config exists
 resource "null_resource" "my_gh_network_config" {
+  depends_on = [ var.az_ghns_ghid ]
   # Fire off this resource block if anything about any of these details changes
   triggers = {
     gh_org_name            = var.gh_org_name
