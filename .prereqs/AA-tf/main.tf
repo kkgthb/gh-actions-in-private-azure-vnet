@@ -5,4 +5,5 @@ module "github_org_config" {
   }
   workload_nickname = var.workload_nickname
   gh_org_name       = var.gh_org_name
+  az_ghns_ghid      = "testing123"
 }
