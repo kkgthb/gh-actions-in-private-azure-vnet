@@ -7,6 +7,11 @@ provider "azurerm" {
   resource_provider_registrations = "none"
 }
 
+# Configure the AzAPI provider
+provider "azapi" {
+  alias = "demo"
+}
+
 # Configure the GitHub provider
 provider "github" {
   alias = "demo"
