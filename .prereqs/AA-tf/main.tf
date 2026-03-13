@@ -2,6 +2,7 @@ module "azure" {
   source = "./modules/azure"
   providers = {
     azurerm = azurerm.demo
+    github = github.demo
   }
   workload_nickname = var.workload_nickname
   gh_org_name       = var.gh_org_name
